@@ -7,6 +7,7 @@
 #include "renderer.hpp"
 #include "system.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <thread>
 
@@ -41,6 +42,8 @@ int main()
     renderer.begin();
 
     bool running = true;
+
+    double maxNetworkSpeed = 1.0;
 
     while (running)
     {
@@ -77,8 +80,12 @@ int main()
         diskGraph.addSample(
             diskInfo.usage);
 
-        networkGraph.addSample(
+        maxNetworkSpeed = std::max(
+            maxNetworkSpeed,
             networkInfo.downloadSpeed);
+
+        networkGraph.addSample(
+            (networkInfo.downloadSpeed / maxNetworkSpeed) * 100.0);
 
         //-------------------------------------
         // Draw UI

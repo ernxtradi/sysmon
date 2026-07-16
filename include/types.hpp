@@ -38,12 +38,17 @@ struct NetworkInfo {
 struct ProcessInfo
 {
     int pid = 0;
+    int parentPid = 0;
 
     std::string name;
     std::string user;
     std::string state;
+    std::string command;
 
     uint64_t memoryBytes = 0;
+    uint64_t virtualMemory = 0;
+
+    unsigned int threads = 0;
 
     double cpuUsage = 0.0;
 };

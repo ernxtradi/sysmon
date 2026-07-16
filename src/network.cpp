@@ -1,9 +1,12 @@
 #include "network.hpp"
 
+#include <arpa/inet.h>
+#include <chrono>
+#include <cstring>
 #include <fstream>
+#include <ifaddrs.h>
 #include <sstream>
 #include <thread>
-#include <chrono>
 
 Network::Network()
     : previousRx(0),
@@ -49,6 +52,9 @@ NetworkInfo Network::getInfo()
 
     info.ipAddress = getIPAddress();
 
+    if (interfaceName.empty())
+        return info;
+
     std::ifstream file("/proc/net/dev");
 
     if (!file.is_open())
@@ -63,12 +69,15 @@ NetworkInfo Network::getInfo()
 
         auto pos = line.find(':');
 
+        if (pos == std::string::npos)
+            continue;
+
         line = line.substr(pos + 1);
 
         std::stringstream ss(line);
 
-        uint64_t rxBytes;
-        uint64_t txBytes;
+        uint64_t rxBytes = 0;
+        uint64_t txBytes = 0;
 
         ss >> rxBytes;
 
@@ -79,6 +88,9 @@ NetworkInfo Network::getInfo()
         }
 
         ss >> txBytes;
+
+        if (ss.fail())
+            continue;
 
         if (previousRx == 0)
         {
@@ -94,11 +106,18 @@ NetworkInfo Network::getInfo()
         info.bytesReceived = rxBytes;
         info.bytesSent = txBytes;
 
+        // Counters can go backwards if the interface is reset (down/up,
+        // driver reload), which would otherwise underflow to a huge
+        // value. Treat that as a fresh baseline instead.
         info.downloadSpeed =
-            static_cast<double>(rxBytes - previousRx);
+            (rxBytes >= previousRx)
+                ? static_cast<double>(rxBytes - previousRx)
+                : 0.0;
 
         info.uploadSpeed =
-            static_cast<double>(txBytes - previousTx);
+            (txBytes >= previousTx)
+                ? static_cast<double>(txBytes - previousTx)
+                : 0.0;
 
         previousRx = rxBytes;
         previousTx = txBytes;
@@ -111,5 +130,41 @@ NetworkInfo Network::getInfo()
 
 std::string Network::getIPAddress()
 {
-    return "127.0.0.1";
+    const std::string fallback = "127.0.0.1";
+
+    ifaddrs* addrs = nullptr;
+
+    if (getifaddrs(&addrs) != 0)
+        return fallback;
+
+    std::string result = fallback;
+
+    for (ifaddrs* addr = addrs; addr != nullptr; addr = addr->ifa_next)
+    {
+        if (addr->ifa_addr == nullptr)
+            continue;
+
+        if (addr->ifa_addr->sa_family != AF_INET)
+            continue;
+
+        if (!interfaceName.empty() &&
+            interfaceName != addr->ifa_name)
+            continue;
+
+        char buffer[INET_ADDRSTRLEN];
+
+        const auto* sin =
+            reinterpret_cast<sockaddr_in*>(addr->ifa_addr);
+
+        if (inet_ntop(AF_INET, &sin->sin_addr, buffer, sizeof(buffer)) !=
+            nullptr)
+        {
+            result = buffer;
+            break;
+        }
+    }
+
+    freeifaddrs(addrs);
+
+    return result;
 }

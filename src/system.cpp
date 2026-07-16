@@ -49,7 +49,7 @@ SystemInfo System::getInfo()
             if (line.rfind("PRETTY_NAME=", 0) == 0)
             {
                 info.osName =
-                    line.substr(13);
+                    line.substr(12);
 
                 if (!info.osName.empty() &&
                     info.osName.front() == '"' &&

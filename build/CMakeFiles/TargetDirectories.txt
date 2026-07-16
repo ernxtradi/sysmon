@@ -1,0 +1,3 @@
+/home/ernxt/Desktop/projects/sysmon/build/CMakeFiles/sysmon.dir
+/home/ernxt/Desktop/projects/sysmon/build/CMakeFiles/edit_cache.dir
+/home/ernxt/Desktop/projects/sysmon/build/CMakeFiles/rebuild_cache.dir

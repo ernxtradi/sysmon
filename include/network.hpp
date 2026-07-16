@@ -14,6 +14,9 @@ private:
     uint64_t previousRx;
     uint64_t previousTx;
 
+    std::string interfaceName;
+
+    void detectInterface();
     std::string getIPAddress();
 };
 
