@@ -1,5 +1,7 @@
 #include "cpu.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <sstream>
 #include <thread>
@@ -19,6 +21,7 @@ CPUInfo CPU::getInfo()
     info.temperature = getTemperature();
     info.frequency = getFrequency();
     info.cores = getCoreCount();
+    info.perCoreUsage = calculatePerCoreUsage();
 
     return info;
 }
@@ -82,7 +85,100 @@ double CPU::calculateUsage()
     if (deltaTotal == 0)
         return 0.0;
 
-    return (100.0 * (deltaTotal - deltaIdle)) / deltaTotal;
+    // /proc/stat's per-field jiffie counters aren't perfectly monotonic
+    // under scheduling pressure (idle can occasionally tick backwards
+    // between two close reads), which would otherwise produce a usage
+    // figure outside the mathematically possible [0, 100] range.
+    return std::clamp(
+        (100.0 * (deltaTotal - deltaIdle)) / deltaTotal,
+        0.0,
+        100.0);
+}
+
+std::vector<double> CPU::calculatePerCoreUsage()
+{
+    std::ifstream file("/proc/stat");
+
+    if (!file.is_open())
+        return {};
+
+    std::string line;
+
+    // Skip the aggregate "cpu " line; per-core lines follow as
+    // "cpu0", "cpu1", ... until the first non-cpu line (e.g. "intr").
+    std::getline(file, line);
+
+    std::vector<long long> idleTimes;
+    std::vector<long long> totalTimes;
+
+    while (std::getline(file, line))
+    {
+        if (line.rfind("cpu", 0) != 0 ||
+            line.size() < 4 ||
+            !std::isdigit(static_cast<unsigned char>(line[3])))
+        {
+            break;
+        }
+
+        std::istringstream ss(line);
+
+        std::string label;
+
+        long long user;
+        long long nice;
+        long long system;
+        long long idle;
+        long long iowait;
+        long long irq;
+        long long softirq;
+        long long steal;
+
+        ss >> label
+           >> user
+           >> nice
+           >> system
+           >> idle
+           >> iowait
+           >> irq
+           >> softirq
+           >> steal;
+
+        idleTimes.push_back(idle + iowait);
+
+        totalTimes.push_back(
+            user + nice + system + idle + iowait + irq + softirq + steal);
+    }
+
+    // Core count changed (first call, or hotplugged CPUs) - record a
+    // baseline and report 0% for this sample rather than a bogus delta.
+    if (previousTotalPerCore.size() != totalTimes.size())
+    {
+        previousIdlePerCore = idleTimes;
+        previousTotalPerCore = totalTimes;
+
+        return std::vector<double>(totalTimes.size(), 0.0);
+    }
+
+    std::vector<double> usage(totalTimes.size(), 0.0);
+
+    for (std::size_t i = 0; i < totalTimes.size(); ++i)
+    {
+        long long deltaIdle = idleTimes[i] - previousIdlePerCore[i];
+        long long deltaTotal = totalTimes[i] - previousTotalPerCore[i];
+
+        if (deltaTotal > 0)
+        {
+            usage[i] = std::clamp(
+                (100.0 * (deltaTotal - deltaIdle)) / deltaTotal,
+                0.0,
+                100.0);
+        }
+    }
+
+    previousIdlePerCore = idleTimes;
+    previousTotalPerCore = totalTimes;
+
+    return usage;
 }
 
 double CPU::getTemperature()

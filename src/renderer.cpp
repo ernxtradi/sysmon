@@ -2,18 +2,12 @@
 #include "utils.hpp"
 
 #include <algorithm>
+#include <clocale>
 #include <cstdio>
 #include <cstring>
 
 namespace
 {
-
-constexpr int HEADER_ROW = 0;
-constexpr int CPU_ROW = 4;
-constexpr int MEMORY_ROW = 8;
-constexpr int DISK_ROW = 12;
-constexpr int NETWORK_ROW = 16;
-constexpr int PROCESS_ROW = 20;
 
 constexpr int PAIR_GREEN = 1;
 constexpr int PAIR_YELLOW = 2;
@@ -35,12 +29,30 @@ void drawSeparator(int row, int width)
     mvhline(row, 0, ACS_HLINE, width);
 }
 
+// mvprintw doesn't stop at the right edge - text longer than the
+// remaining width wraps onto the next line, corrupting whatever is
+// drawn there next (e.g. a long kernel version string bleeding into
+// the uptime line below it). Clip first so a single call never
+// crosses the edge.
+void printClipped(int row, int col, int width, const std::string& text)
+{
+    int available = std::max(0, width - col);
+
+    std::string clipped = text;
+
+    if (static_cast<int>(clipped.size()) > available)
+        clipped.resize(static_cast<std::size_t>(available));
+
+    mvprintw(row, col, "%s", clipped.c_str());
+}
+
 }
 
 Renderer::Renderer()
 {
     width = 0;
     height = 0;
+    nextRow = 0;
 }
 
 Renderer::~Renderer()
@@ -50,6 +62,11 @@ Renderer::~Renderer()
 
 void Renderer::begin()
 {
+    // Must happen before initscr() - it's how ncursesw detects the
+    // terminal's encoding is UTF-8 and switches its printw()/mvprintw()
+    // cursor tracking from bytes to decoded glyphs.
+    std::setlocale(LC_ALL, "");
+
     initscr();
 
     noecho();
@@ -60,7 +77,16 @@ void Renderer::begin()
 
     keypad(stdscr, TRUE);
 
-    timeout(0);
+    // Block for up to 100ms waiting for a key; this is what paces the
+    // main loop now (replacing a fixed post-render sleep), so input is
+    // picked up promptly instead of once per data-refresh cycle.
+    timeout(100);
+
+#ifdef NCURSES_VERSION
+    // Default ESCDELAY (~1s) makes Esc feel unresponsive when using it
+    // to back out of filter/kill-confirm mode.
+    set_escdelay(25);
+#endif
 
     start_color();
 
@@ -85,6 +111,8 @@ void Renderer::clear()
     getmaxyx(stdscr, height, width);
 
     erase();
+
+    nextRow = 0;
 }
 
 void Renderer::refreshScreen()
@@ -94,35 +122,48 @@ void Renderer::refreshScreen()
 
 void Renderer::drawHeader(const SystemInfo& system)
 {
-    mvprintw(
-        HEADER_ROW,
-        0,
+    int row = nextRow;
+
+    char hostLine[512];
+
+    std::snprintf(
+        hostLine,
+        sizeof(hostLine),
         "Host: %s   OS: %s",
         system.hostname.c_str(),
         system.osName.c_str());
 
-    mvprintw(
-        HEADER_ROW + 1,
-        0,
+    char kernelLine[512];
+
+    std::snprintf(
+        kernelLine,
+        sizeof(kernelLine),
         "Kernel: %s",
         system.kernel.c_str());
 
+    printClipped(row, 0, width, hostLine);
+    printClipped(row + 1, 0, width, kernelLine);
+
     mvprintw(
-        HEADER_ROW + 2,
+        row + 2,
         0,
         "Uptime: %s",
         system.uptime.c_str());
 
-    drawSeparator(HEADER_ROW + 3, width);
+    drawSeparator(row + 3, width);
+
+    nextRow = row + 4;
 }
 
 void Renderer::drawCPU(
     const CPUInfo& cpu,
     const Graph& history)
 {
+    int row = nextRow;
+
     int pair = usageColorPair(cpu.usage);
 
-    mvprintw(CPU_ROW, 0, "CPU   ");
+    mvprintw(row, 0, "CPU   ");
 
     attron(COLOR_PAIR(pair));
     printw("%5.1f%%", cpu.usage);
@@ -134,28 +175,61 @@ void Renderer::drawCPU(
         cpu.frequency,
         cpu.cores);
 
-    move(CPU_ROW + 1, 0);
+    move(row + 1, 0);
 
     attron(COLOR_PAIR(pair));
     printw("%s", Utils::percentageBar(cpu.usage).c_str());
     attroff(COLOR_PAIR(pair));
 
+    int perCoreRow = row + 2;
+    int coreLines = 0;
+
+    if (!cpu.perCoreUsage.empty())
+    {
+        constexpr int columnWidth = 10; // "C00: 100% "
+
+        int columns = std::max(1, width / columnWidth);
+
+        for (std::size_t i = 0; i < cpu.perCoreUsage.size(); ++i)
+        {
+            int line = static_cast<int>(i) / columns;
+            int col = (static_cast<int>(i) % columns) * columnWidth;
+
+            int corePair = usageColorPair(cpu.perCoreUsage[i]);
+
+            move(perCoreRow + line, col);
+
+            attron(COLOR_PAIR(corePair));
+            printw("C%-2zu%4.0f%%", i, cpu.perCoreUsage[i]);
+            attroff(COLOR_PAIR(corePair));
+        }
+
+        coreLines =
+            static_cast<int>((cpu.perCoreUsage.size() + columns - 1) / columns);
+    }
+
     mvprintw(
-        CPU_ROW + 2,
+        perCoreRow + coreLines,
         0,
         "%s",
         history.render().c_str());
 
-    drawSeparator(CPU_ROW + 3, width);
+    int bottom = perCoreRow + coreLines + 1;
+
+    drawSeparator(bottom, width);
+
+    nextRow = bottom + 1;
 }
 
 void Renderer::drawMemory(
     const MemoryInfo& memory,
     const Graph& history)
 {
+    int row = nextRow;
+
     int pair = usageColorPair(memory.usage);
 
-    mvprintw(MEMORY_ROW, 0, "MEM   ");
+    mvprintw(row, 0, "MEM   ");
 
     attron(COLOR_PAIR(pair));
     printw("%5.1f%%", memory.usage);
@@ -166,59 +240,69 @@ void Renderer::drawMemory(
         Utils::bytesToHuman(memory.used).c_str(),
         Utils::bytesToHuman(memory.total).c_str());
 
-    move(MEMORY_ROW + 1, 0);
+    move(row + 1, 0);
 
     attron(COLOR_PAIR(pair));
     printw("%s", Utils::percentageBar(memory.usage).c_str());
     attroff(COLOR_PAIR(pair));
 
     mvprintw(
-        MEMORY_ROW + 2,
+        row + 2,
         0,
         "%s",
         history.render().c_str());
 
-    drawSeparator(MEMORY_ROW + 3, width);
+    drawSeparator(row + 3, width);
+
+    nextRow = row + 4;
 }
 
 void Renderer::drawDisk(
     const DiskInfo& disk,
     const Graph& history)
 {
+    int row = nextRow;
+
     int pair = usageColorPair(disk.usage);
 
-    mvprintw(DISK_ROW, 0, "DISK  ");
+    mvprintw(row, 0, "DISK  ");
 
     attron(COLOR_PAIR(pair));
     printw("%5.1f%%", disk.usage);
     attroff(COLOR_PAIR(pair));
 
     printw(
-        "   %s / %s",
+        "   %s / %s   R: %s/s   W: %s/s",
         Utils::bytesToHuman(disk.used).c_str(),
-        Utils::bytesToHuman(disk.total).c_str());
+        Utils::bytesToHuman(disk.total).c_str(),
+        Utils::bytesToHuman(static_cast<uint64_t>(disk.readSpeed)).c_str(),
+        Utils::bytesToHuman(static_cast<uint64_t>(disk.writeSpeed)).c_str());
 
-    move(DISK_ROW + 1, 0);
+    move(row + 1, 0);
 
     attron(COLOR_PAIR(pair));
     printw("%s", Utils::percentageBar(disk.usage).c_str());
     attroff(COLOR_PAIR(pair));
 
     mvprintw(
-        DISK_ROW + 2,
+        row + 2,
         0,
         "%s",
         history.render().c_str());
 
-    drawSeparator(DISK_ROW + 3, width);
+    drawSeparator(row + 3, width);
+
+    nextRow = row + 4;
 }
 
 void Renderer::drawNetwork(
     const NetworkInfo& network,
     const Graph& history)
 {
+    int row = nextRow;
+
     mvprintw(
-        NETWORK_ROW,
+        row,
         0,
         "NET   IP: %-15s  Down: %s/s   Up: %s/s",
         network.ipAddress.c_str(),
@@ -228,19 +312,66 @@ void Renderer::drawNetwork(
             static_cast<uint64_t>(network.uploadSpeed)).c_str());
 
     mvprintw(
-        NETWORK_ROW + 1,
+        row + 1,
         0,
         "%s",
         history.render().c_str());
 
-    drawSeparator(NETWORK_ROW + 2, width);
+    drawSeparator(row + 2, width);
+
+    nextRow = row + 3;
 }
 
 void Renderer::drawProcesses(
-    const std::vector<ProcessInfo>& processes)
+    const std::vector<ProcessInfo>& processes,
+    ProcessListState& state)
 {
+    int row = nextRow;
+
+    //-------------------------------------------------------
+    // Status line: kill confirmation > filter input > a
+    // transient status message > the default legend.
+    //-------------------------------------------------------
+
+    if (state.confirmingKill)
+    {
+        attron(COLOR_PAIR(PAIR_RED));
+
+        mvprintw(
+            row,
+            0,
+            "Kill PID %d (%s)? [y/n]",
+            state.killPid,
+            state.killName.c_str());
+
+        attroff(COLOR_PAIR(PAIR_RED));
+    }
+    else if (state.filtering)
+    {
+        mvprintw(
+            row,
+            0,
+            "Filter: %s_",
+            state.filterText.c_str());
+    }
+    else if (!state.statusMessage.empty())
+    {
+        mvprintw(row, 0, "%s", state.statusMessage.c_str());
+    }
+    else
+    {
+        mvprintw(
+            row,
+            0,
+            "Sort: %-3s  Filter: %-15s  [up/down select  s sort  / filter  x kill  q quit]",
+            state.sortMode == SortMode::Cpu ? "CPU" : "MEM",
+            state.filterText.empty() ? "(none)" : state.filterText.c_str());
+    }
+
+    int headerRow = row + 1;
+
     mvprintw(
-        PROCESS_ROW,
+        headerRow,
         0,
         "%-7s %-7s %-9s %-5s %4s %6s %8s %8s  %s",
         "PID",
@@ -253,16 +384,46 @@ void Renderer::drawProcesses(
         "VSZ",
         "COMMAND");
 
-    int row = PROCESS_ROW + 1;
+    int listRow = headerRow + 1;
 
-    int maxRows = std::max(0, height - row);
+    int maxRows = std::max(0, height - listRow);
 
-    std::size_t count =
-        std::min(processes.size(), static_cast<std::size_t>(maxRows));
+    // Keep the selection on screen by adjusting the scroll window.
+    // selectedIndex is assumed already clamped to a valid index for
+    // `processes` by the caller.
+    if (maxRows > 0)
+    {
+        if (state.selectedIndex < state.scrollOffset)
+        {
+            state.scrollOffset = state.selectedIndex;
+        }
+        else if (state.selectedIndex >=
+                 state.scrollOffset + static_cast<std::size_t>(maxRows))
+        {
+            state.scrollOffset =
+                state.selectedIndex - static_cast<std::size_t>(maxRows) + 1;
+        }
+    }
+
+    std::size_t count = 0;
+
+    if (!processes.empty() && maxRows > 0)
+    {
+        count = std::min(
+            processes.size() - state.scrollOffset,
+            static_cast<std::size_t>(maxRows));
+    }
 
     for (std::size_t i = 0; i < count; ++i)
     {
-        const ProcessInfo& process = processes[i];
+        std::size_t index = state.scrollOffset + i;
+
+        const ProcessInfo& process = processes[index];
+
+        bool selected = (index == state.selectedIndex);
+
+        if (selected)
+            attron(A_REVERSE);
 
         char prefix[80];
 
@@ -276,7 +437,7 @@ void Renderer::drawProcesses(
             process.state.c_str(),
             process.threads);
 
-        mvprintw(row + static_cast<int>(i), 0, "%s", prefix);
+        mvprintw(listRow + static_cast<int>(i), 0, "%s", prefix);
 
         int pair = usageColorPair(process.cpuUsage);
 
@@ -303,8 +464,14 @@ void Renderer::drawProcesses(
         std::string command = process.command;
 
         if (static_cast<int>(command.size()) > remaining)
-            command.resize(remaining);
+            command.resize(static_cast<std::size_t>(remaining));
 
         printw("%s", command.c_str());
+
+        if (selected)
+            attroff(A_REVERSE);
     }
+
+    // Last (variable-height) section on screen - nothing else is
+    // drawn below it, so there's no need to advance nextRow further.
 }

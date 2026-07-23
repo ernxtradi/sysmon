@@ -11,6 +11,7 @@ struct CPUInfo {
     double temperature = 0.0;
     double frequency = 0.0;
     unsigned int cores = 0;
+    std::vector<double> perCoreUsage;
 };
 
 struct MemoryInfo {
@@ -25,6 +26,8 @@ struct DiskInfo {
     uint64_t free = 0;
     uint64_t used = 0;
     double usage = 0.0;
+    double readSpeed = 0.0;
+    double writeSpeed = 0.0;
 };
 
 struct NetworkInfo {
